@@ -28,15 +28,20 @@
         /// </summary>
         private void InitializeComponent()
         {
+            components = new System.ComponentModel.Container();
             treeView1 = new TreeView();
             button1 = new Button();
+            statusStrip1 = new StatusStrip();
+            toolStripStatusLabel1 = new ToolStripStatusLabel();
+            timer1 = new System.Windows.Forms.Timer(components);
+            statusStrip1.SuspendLayout();
             SuspendLayout();
             // 
             // treeView1
             // 
             treeView1.Location = new Point(12, 42);
             treeView1.Name = "treeView1";
-            treeView1.Size = new Size(241, 396);
+            treeView1.Size = new Size(241, 382);
             treeView1.TabIndex = 0;
             // 
             // button1
@@ -49,22 +54,49 @@
             button1.UseVisualStyleBackColor = true;
             button1.Click += btnScan_Click;
             // 
+            // statusStrip1
+            // 
+            statusStrip1.Items.AddRange(new ToolStripItem[] { toolStripStatusLabel1 });
+            statusStrip1.Location = new Point(0, 430);
+            statusStrip1.Name = "statusStrip1";
+            statusStrip1.Size = new Size(267, 22);
+            statusStrip1.TabIndex = 2;
+            statusStrip1.Text = "statusStrip1";
+            // 
+            // toolStripStatusLabel1
+            // 
+            toolStripStatusLabel1.Name = "toolStripStatusLabel1";
+            toolStripStatusLabel1.Size = new Size(118, 17);
+            toolStripStatusLabel1.Text = "toolStripStatusLabel1";
+            // 
+            // timer1
+            // 
+            timer1.Enabled = true;
+            timer1.Tick += timer1_Tick;
+            // 
             // Form1
             // 
             AutoScaleDimensions = new SizeF(7F, 15F);
             AutoScaleMode = AutoScaleMode.Font;
             ClientSize = new Size(267, 452);
+            Controls.Add(statusStrip1);
             Controls.Add(button1);
             Controls.Add(treeView1);
             Name = "Form1";
             Text = "Form1";
             Resize += Form1_Resize;
+            statusStrip1.ResumeLayout(false);
+            statusStrip1.PerformLayout();
             ResumeLayout(false);
+            PerformLayout();
         }
 
         #endregion
 
         private TreeView treeView1;
         private Button button1;
+        private StatusStrip statusStrip1;
+        private ToolStripStatusLabel toolStripStatusLabel1;
+        private System.Windows.Forms.Timer timer1;
     }
 }

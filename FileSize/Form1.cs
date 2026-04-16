@@ -28,78 +28,74 @@ namespace FileSize
         private void FlushUpdateBucket(object sender, EventArgs e)
         {
             if (_updateBucket.IsEmpty) return;
+            _uiUpdateTimer.Stop();
+
+            // Track which parents need sorting so we only do it ONCE per parent
+            HashSet<TreeNode> dirtyParents = new HashSet<TreeNode>();
+            var watch = System.Diagnostics.Stopwatch.StartNew();
 
             treeView1.BeginUpdate();
             try
             {
-                int batchLimit = 1000;
-                while (_updateBucket.TryDequeue(out var update) && batchLimit-- > 0)
+                // Process for a max of 100ms per tick or 5000 items
+                int count = 0;
+                while (_updateBucket.TryDequeue(out var update) && count < 10000 && watch.ElapsedMilliseconds < 500)
                 {
-                    // 1. Find or Create the Parent Node
+                    count++;
                     if (!_pathMap.TryGetValue(update.ParentPath, out TreeNode parentNode)) continue;
 
-                    // 2. Find or Create the Current Node
                     if (!_pathMap.TryGetValue(update.FullPath, out TreeNode currentNode))
                     {
-                        currentNode = new TreeNode(update.ItemName) { Name = update.FullPath };
+                        currentNode = new TreeNode(update.ItemName) { Name = update.FullPath, Tag = 0L };
                         parentNode.Nodes.Add(currentNode);
                         _pathMap[update.FullPath] = currentNode;
                     }
 
-                    // 3. Update Data
+                    // Update Tag and Text
                     currentNode.Tag = update.Size;
-                    if (update.IsFolder)
-                    {
-                        currentNode.Text = $"{update.ItemName} - [{FormatSize(update.Size)}]";
-                    }
-                    else
-                    {
-                        currentNode.Text = $"{update.ItemName} ({FormatSize(update.Size)})";
-                    }
+                    currentNode.Text = update.IsFolder
+                        ? $"{update.ItemName} - [{FormatSize(update.Size)}]"
+                        : $"{update.ItemName} ({FormatSize(update.Size)})";
 
-                    // 4. Mark parent for sorting (Optional: only sort every 5th tick to save CPU)
-                    SortFolderNodes(parentNode);
+                    dirtyParents.Add(parentNode);
+                }
+
+                // NOW sort each unique parent once
+                foreach (var parent in dirtyParents)
+                {
+                    SortFolderNodes(parent);
                 }
             }
             finally
             {
                 treeView1.EndUpdate();
+                if (!_updateBucket.IsEmpty) _uiUpdateTimer.Start();
+                // If the scan is finished and bucket is empty, don't restart the timer.
             }
         }
-
 
         private void SortFolderNodes(TreeNode parent)
         {
             if (parent.Nodes.Count < 2) return;
 
-            // Capture nodes, sort them by the 'long' size in the Tag, and re-add
-            var sortedNodes = parent.Nodes.Cast<TreeNode>()
+            // Get the current order
+            var currentNodes = parent.Nodes.Cast<TreeNode>().ToList();
+
+            // Determine what the sorted order SHOULD be
+            var sortedNodes = currentNodes
                 .OrderByDescending(n => n.Tag is long l ? l : 0L)
-                .ToArray();
+                .ToList();
 
-            // Check if the order actually changed before clearing (performance boost)
-            parent.Nodes.Clear();
-            parent.Nodes.AddRange(sortedNodes);
+            // CRITICAL: Only update the UI if the order actually changed
+            // This saves massive amounts of rendering time
+            if (!currentNodes.SequenceEqual(sortedNodes))
+            {
+                parent.Nodes.Clear();
+                parent.Nodes.AddRange(sortedNodes.ToArray());
+            }
         }
 
-       
-        public long GetDirectorySize(DirectoryInfo d)
-        {
-            long size = 0;
-            // Add file sizes
-            FileInfo[] fis = d.GetFiles();
-            foreach (FileInfo fi in fis)
-            {
-                size += fi.Length;
-            }
-            // Add subdirectory sizes
-            DirectoryInfo[] dis = d.GetDirectories();
-            foreach (DirectoryInfo di in dis)
-            {
-                size += GetDirectorySize(di);
-            }
-            return size;
-        }
+
 
         // Simple class to pass data back to the UI
         public class ScanUpdate
@@ -124,9 +120,15 @@ namespace FileSize
                 _pathMap[rootDir.FullName] = rootNode; // Add the root to the map!
 
                 _uiUpdateTimer.Start();
+                nFolder = 0;
+                nFile = 0;
+                timer1.Start();
                 await Task.Run(() => SafeDynamicScan(rootDir));
             }
         }
+
+        private int nFolder = 0;
+        private int nFile = 0;
 
         private long SafeDynamicScan(DirectoryInfo dir)
         {
@@ -145,7 +147,8 @@ namespace FileSize
                         Size = file.Length,
                         IsFolder = false
                     });
-                    Thread.Sleep(10); // Simulate delay for testing UI responsiveness
+                    //Thread.Sleep(10); // Simulate delay for testing UI responsiveness
+                    nFile++;
                 }
 
                 foreach (var subDir in dir.GetDirectories())
@@ -174,105 +177,14 @@ namespace FileSize
                         Size = subSize,
                         IsFolder = true
                     });
-                    Thread.Sleep(10);               // Simulate delay for testing UI responsiveness
+                    //Thread.Sleep(10);               // Simulate delay for testing UI responsiveness
+                    nFolder++;
                 }
             }
-            catch (UnauthorizedAccessException) { Thread.Sleep(1); }
+            catch (UnauthorizedAccessException) { }
             return currentDirSize;
         }
 
-        private FolderModel BuildModel(DirectoryInfo dir)
-        {
-            var model = new FolderModel { Name = dir.Name, FullPath = dir.FullName };
-
-            try
-            {
-                // Add Files
-                foreach (var file in dir.GetFiles())
-                {
-                    model.Files.Add(new FileModel(file.Name, file.Length));
-                    model.TotalSize += file.Length;
-                }
-
-                // Add Subfolders
-                foreach (var subDir in dir.GetDirectories())
-                {
-                    // Skip Junctions/Reparse Points to avoid User folder errors
-                    if ((subDir.Attributes & FileAttributes.ReparsePoint) == FileAttributes.ReparsePoint) continue;
-
-                    var subModel = BuildModel(subDir);
-                    model.SubFolders.Add(subModel);
-                    model.TotalSize += subModel.TotalSize; // Bubble the size up
-                }
-            }
-            catch (UnauthorizedAccessException) { /* Log or skip */ }
-
-            return model;
-        }
-
-        private void SortModel(FolderModel model)
-        {
-            // Sort subfolders by size descending
-            model.SubFolders = model.SubFolders.OrderByDescending(f => f.TotalSize).ToList();
-
-            // Sort files by size descending
-            model.Files = model.Files.OrderByDescending(f => f.Size).ToList();
-
-            // Recursively sort subfolders
-            foreach (var sub in model.SubFolders)
-            {
-                SortModel(sub);
-            }
-        }
-
-        private TreeNode ConvertModelToTreeNode(FolderModel model)
-        {
-            var node = new TreeNode($"{model.Name} [{FormatSize(model.TotalSize)}]");
-
-            foreach (var sub in model.SubFolders)
-            {
-                node.Nodes.Add(ConvertModelToTreeNode(sub));
-            }
-
-            foreach (var file in model.Files)
-            {
-                node.Nodes.Add(new TreeNode($"{file.Name} ({FormatSize(file.Size)})"));
-            }
-
-            return node;
-        }
-
-        private TreeNode CreateDirectoryNode(DirectoryInfo directoryInfo)
-        {
-            long size = 0;
-            var directoryNode = new TreeNode(directoryInfo.Name);
-
-            try
-            {
-                // Files in this folder
-                foreach (var file in directoryInfo.GetFiles())
-                {
-                    size += file.Length;
-                    directoryNode.Nodes.Add(new TreeNode($"{file.Name} ({FormatSize(file.Length)})"));
-                }
-
-                // Subdirectories
-                foreach (var directory in directoryInfo.GetDirectories())
-                {
-                    var subNode = CreateDirectoryNode(directory);
-                    // Add the size of the subnode back to our current total
-                    // (Note: In a production app, you'd store the 'long' size in the .Tag property)
-                    directoryNode.Nodes.Add(subNode);
-                }
-            }
-            catch (UnauthorizedAccessException)
-            {
-                directoryNode.Nodes.Add("Access Denied");
-            }
-
-            directoryNode.Text += $" - [{FormatSize(GetDirectorySize(directoryInfo))}]";
-            return directoryNode;
-        }
 
         private string FormatSize(long bytes)
         {
@@ -300,6 +212,13 @@ namespace FileSize
             typeof(System.Windows.Forms.TreeView).InvokeMember("DoubleBuffered",
                 BindingFlags.SetProperty | BindingFlags.Instance | BindingFlags.NonPublic,
                 null, treeView1, new object[] { true });
+        }
+
+        private void timer1_Tick(object sender, EventArgs e)
+        {
+            timer1.Stop();
+            statusStrip1.Items[0].Text = $"Folders: {nFolder} | Files: {nFile}";
+            timer1.Start();
         }
     }
 }
