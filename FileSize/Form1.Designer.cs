@@ -34,6 +34,10 @@
             statusStrip1 = new StatusStrip();
             toolStripStatusLabel1 = new ToolStripStatusLabel();
             timer1 = new System.Windows.Forms.Timer(components);
+            listViewFiles = new ListView();
+            columnHeader1 = new ColumnHeader();
+            columnHeader2 = new ColumnHeader();
+            columnHeader3 = new ColumnHeader();
             statusStrip1.SuspendLayout();
             SuspendLayout();
             // 
@@ -43,6 +47,7 @@
             treeView1.Name = "treeView1";
             treeView1.Size = new Size(241, 382);
             treeView1.TabIndex = 0;
+            treeView1.AfterSelect += treeView1_AfterSelect;
             // 
             // button1
             // 
@@ -57,9 +62,9 @@
             // statusStrip1
             // 
             statusStrip1.Items.AddRange(new ToolStripItem[] { toolStripStatusLabel1 });
-            statusStrip1.Location = new Point(0, 430);
+            statusStrip1.Location = new Point(0, 431);
             statusStrip1.Name = "statusStrip1";
-            statusStrip1.Size = new Size(267, 22);
+            statusStrip1.Size = new Size(688, 22);
             statusStrip1.TabIndex = 2;
             statusStrip1.Text = "statusStrip1";
             // 
@@ -74,11 +79,37 @@
             timer1.Enabled = true;
             timer1.Tick += timer1_Tick;
             // 
+            // listViewFiles
+            // 
+            listViewFiles.Columns.AddRange(new ColumnHeader[] { columnHeader1, columnHeader2, columnHeader3 });
+            listViewFiles.Location = new Point(259, 42);
+            listViewFiles.Name = "listViewFiles";
+            listViewFiles.Size = new Size(420, 382);
+            listViewFiles.TabIndex = 3;
+            listViewFiles.UseCompatibleStateImageBehavior = false;
+            listViewFiles.View = View.Details;
+            // 
+            // columnHeader1
+            // 
+            columnHeader1.Text = "Name";
+            columnHeader1.Width = 200;
+            // 
+            // columnHeader2
+            // 
+            columnHeader2.Text = "Size";
+            columnHeader2.Width = 100;
+            // 
+            // columnHeader3
+            // 
+            columnHeader3.Text = "Type";
+            columnHeader3.Width = 100;
+            // 
             // Form1
             // 
             AutoScaleDimensions = new SizeF(7F, 15F);
             AutoScaleMode = AutoScaleMode.Font;
-            ClientSize = new Size(267, 452);
+            ClientSize = new Size(688, 453);
+            Controls.Add(listViewFiles);
             Controls.Add(statusStrip1);
             Controls.Add(button1);
             Controls.Add(treeView1);
@@ -98,5 +129,9 @@
         private StatusStrip statusStrip1;
         private ToolStripStatusLabel toolStripStatusLabel1;
         private System.Windows.Forms.Timer timer1;
+        private ListView listViewFiles;
+        private ColumnHeader columnHeader1;
+        private ColumnHeader columnHeader2;
+        private ColumnHeader columnHeader3;
     }
 }

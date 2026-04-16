@@ -10,6 +10,7 @@ namespace FileSize
         // A thread-safe bucket to hold updates until the UI is ready
         private ConcurrentQueue<ScanUpdate> _updateBucket = new();
         private System.Windows.Forms.Timer _uiUpdateTimer;
+        private CancellationTokenSource _cts;
 
         public Form1()
         {
@@ -39,7 +40,7 @@ namespace FileSize
             {
                 // Process for a max of 100ms per tick or 5000 items
                 int count = 0;
-                while (_updateBucket.TryDequeue(out var update) && count < 10000 && watch.ElapsedMilliseconds < 500)
+                while (_updateBucket.TryDequeue(out var update) && count < 5000 && watch.ElapsedMilliseconds < 100)
                 {
                     count++;
                     if (!_pathMap.TryGetValue(update.ParentPath, out TreeNode parentNode)) continue;
@@ -109,45 +110,77 @@ namespace FileSize
 
         private async void btnScan_Click(object sender, EventArgs e)
         {
+            // 1. If a scan is already running, stop it first!
+            if (_cts != null)
+            {
+                _cts.Cancel();
+                _cts.Dispose();
+            }
+
             using var fbd = new FolderBrowserDialog();
             if (fbd.ShowDialog() == DialogResult.OK)
             {
-                treeView1.Nodes.Clear();
+                // 2. Initialize a fresh token for this specific scan
+                _cts = new CancellationTokenSource();
+                CancellationToken token = _cts.Token;
+
+                // Reset UI and Data
+                _updateBucket.Clear();
                 _pathMap.Clear();
+                treeView1.Nodes.Clear();
+                listViewFiles.Items.Clear(); // Clear your file pane too
+
                 var rootDir = new DirectoryInfo(fbd.SelectedPath);
                 var rootNode = new TreeNode(rootDir.Name) { Name = rootDir.FullName };
                 treeView1.Nodes.Add(rootNode);
-                _pathMap[rootDir.FullName] = rootNode; // Add the root to the map!
+                _pathMap[rootDir.FullName] = rootNode;
 
-                _uiUpdateTimer.Start();
+                // Reset counters and start timers
                 nFolder = 0;
                 nFile = 0;
-                timer1.Start();
-                await Task.Run(() => SafeDynamicScan(rootDir));
+                _uiUpdateTimer.Start(); // The bucket flusher
+                timer1.Start();         // Your stats timer
+
+                try
+                {
+                    // 3. Pass the token into the background task
+                    await Task.Run(() => SafeDynamicScan(rootDir, token), token);
+
+                    // Success! 
+                    timer1.Stop();
+                    statusStrip1.Items[0].Text = $"Folders: {nFolder} | Files: {nFile}";
+                    // Give the bucket one final flush to catch the last items
+                    FlushUpdateBucket(null, null);
+                    _uiUpdateTimer.Stop();
+                }
+                catch (OperationCanceledException)
+                {
+                    // This happens if the user hits "Stop"
+                    this.Text = "Scan Cancelled";
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Error: {ex.Message}");
+                }
             }
         }
 
         private int nFolder = 0;
         private int nFile = 0;
 
-        private long SafeDynamicScan(DirectoryInfo dir)
+        private long SafeDynamicScan(DirectoryInfo dir, CancellationToken token)
         {
-            long currentDirSize = 0;
 
+            // Check if the user clicked Stop
+            if (token.IsCancellationRequested) return 0;
+
+            long currentDirSize = 0;
             try
             {
+                // Sum files internally (Don't Enqueue these!)
                 foreach (var file in dir.GetFiles())
                 {
                     currentDirSize += file.Length;
-                    _updateBucket.Enqueue(new ScanUpdate
-                    {
-                        ParentPath = dir.FullName,
-                        ItemName = file.Name,
-                        FullPath = file.FullName,
-                        Size = file.Length,
-                        IsFolder = false
-                    });
-                    //Thread.Sleep(10); // Simulate delay for testing UI responsiveness
                     nFile++;
                 }
 
@@ -155,7 +188,7 @@ namespace FileSize
                 {
                     if ((subDir.Attributes & FileAttributes.ReparsePoint) == FileAttributes.ReparsePoint) continue;
 
-                    // Initial folder discovery
+                    // Report folder to UI
                     _updateBucket.Enqueue(new ScanUpdate
                     {
                         ParentPath = dir.FullName,
@@ -164,11 +197,10 @@ namespace FileSize
                         IsFolder = true
                     });
 
-
-                    long subSize = SafeDynamicScan(subDir);
+                    long subSize = SafeDynamicScan(subDir, token);
                     currentDirSize += subSize;
 
-                    // Size update for folder
+                    // Update folder with its final cumulative size
                     _updateBucket.Enqueue(new ScanUpdate
                     {
                         ParentPath = dir.FullName,
@@ -177,7 +209,6 @@ namespace FileSize
                         Size = subSize,
                         IsFolder = true
                     });
-                    //Thread.Sleep(10);               // Simulate delay for testing UI responsiveness
                     nFolder++;
                 }
             }
@@ -201,8 +232,14 @@ namespace FileSize
 
         private void Form1_Resize(object sender, EventArgs e)
         {
-            treeView1.Width = this.ClientSize.Width - 20;
-            treeView1.Height = this.ClientSize.Height - 60;
+            treeView1.Width = this.ClientSize.Width / 3;
+            treeView1.Height = this.statusStrip1.Top - 10 - treeView1.Top;
+            listViewFiles.Left = treeView1.Right + 10;
+            listViewFiles.Width = this.ClientSize.Width - treeView1.Width - 30;
+            listViewFiles.Height = treeView1.Height;
+            listViewFiles.Columns[0].Width = listViewFiles.Width / 3 * 2;
+            listViewFiles.Columns[1].Width = listViewFiles.Width / 6;
+            listViewFiles.Columns[2].Width = listViewFiles.Width / 6;
         }
 
         private void EnableDoubleBuffering()
@@ -219,6 +256,40 @@ namespace FileSize
             timer1.Stop();
             statusStrip1.Items[0].Text = $"Folders: {nFolder} | Files: {nFile}";
             timer1.Start();
+        }
+
+        private void treeView1_AfterSelect(object sender, TreeViewEventArgs e)
+        {
+            string path = e.Node.Name; // We stored the FullPath here
+            if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) return;
+
+            listViewFiles.Items.Clear();
+            listViewFiles.BeginUpdate();
+
+            try
+            {
+                DirectoryInfo di = new DirectoryInfo(path);
+
+                // Get files and sort them descending by size
+                var files = di.GetFiles().OrderByDescending(f => f.Length);
+
+                foreach (var file in files)
+                {
+                    var item = new ListViewItem(file.Name);
+                    item.SubItems.Add(FormatSize(file.Length));
+                    item.SubItems.Add(file.Extension.ToUpper().Replace(".", "") + " File");
+
+                    listViewFiles.Items.Add(item);
+                }
+            }
+            catch (Exception ex)
+            {
+                listViewFiles.Items.Add(new ListViewItem($"Access Denied: {ex.Message}"));
+            }
+            finally
+            {
+                listViewFiles.EndUpdate();
+            }
         }
     }
 }
