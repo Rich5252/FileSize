@@ -25,84 +25,20 @@ namespace FileSize
             EnableDoubleBuffering();        //for treeview control to prevent flickering
         }
 
+        private void Form1_Resize(object sender, EventArgs e)
+        {
+            treeView1.Width = this.ClientSize.Width / 3;
+            treeView1.Height = this.statusStrip1.Top - 10 - treeView1.Top;
+            listViewFiles.Left = treeView1.Right + 10;
+            listViewFiles.Width = this.ClientSize.Width - treeView1.Width - 30;
+            listViewFiles.Height = treeView1.Height;
+            listViewFiles.Columns[0].Width = listViewFiles.Width / 3 * 2;
+            listViewFiles.Columns[1].Width = listViewFiles.Width / 6;
+            listViewFiles.Columns[2].Width = listViewFiles.Width / 6;
+        }
+
+
         private Dictionary<string, TreeNode> _pathMap = new();
-
-        private void FlushUpdateBucket(object sender, EventArgs e)
-        {
-            if (_updateBucket.IsEmpty) return;
-            _uiUpdateTimer.Stop();
-
-            HashSet<TreeNode> dirtyParents = new HashSet<TreeNode>();
-            var watch = System.Diagnostics.Stopwatch.StartNew();
-
-            treeView1.BeginUpdate();
-            try
-            {
-                int count = 0;
-                while (_updateBucket.TryDequeue(out var update) && count < 5000 && watch.ElapsedMilliseconds < 30)
-                {
-                    count++;
-                    TreeNode currentNode = null;
-
-                    // 1. Try to find the node directly (Works for Root and existing folders)
-                    if (_pathMap.TryGetValue(update.FullPath, out currentNode))
-                    {
-                        currentNode.Tag = update.Size;
-                    }
-                    // 2. If it's a new subfolder, try to find the parent to create it
-                    else if (!string.IsNullOrEmpty(update.ParentPath) && _pathMap.TryGetValue(update.ParentPath, out TreeNode parentNode))
-                    {
-                        currentNode = new TreeNode(update.ItemName) { Name = update.FullPath, Tag = update.Size };
-                        parentNode.Nodes.Add(currentNode);
-                        _pathMap[update.FullPath] = currentNode;
-                        dirtyParents.Add(parentNode);
-                    }
-
-                    // 3. Always refresh the text if we have a node (either old or newly created)
-                    if (currentNode != null)
-                    {
-                        currentNode.Text = $"{update.ItemName} - [{FormatSize(update.Size)}]";
-
-                        if (currentNode.Parent != null)
-                            dirtyParents.Add(currentNode.Parent);
-                    }
-                }
-
-                // Sort parents that had children change
-                foreach (var parent in dirtyParents)
-                {
-                    SortFolderNodes(parent);
-                }
-            }
-            finally
-            {
-                treeView1.EndUpdate();
-                if (!_updateBucket.IsEmpty) _uiUpdateTimer.Start();
-            }
-        }
-
-        private void SortFolderNodes(TreeNode parent)
-        {
-            if (parent.Nodes.Count < 2) return;
-
-            // Get the current order
-            var currentNodes = parent.Nodes.Cast<TreeNode>().ToList();
-
-            // Determine what the sorted order SHOULD be
-            var sortedNodes = currentNodes
-                .OrderByDescending(n => n.Tag is long l ? l : 0L)
-                .ToList();
-
-            // CRITICAL: Only update the UI if the order actually changed
-            // This saves massive amounts of rendering time
-            if (!currentNodes.SequenceEqual(sortedNodes))
-            {
-                parent.Nodes.Clear();
-                parent.Nodes.AddRange(sortedNodes.ToArray());
-            }
-        }
-
-
 
         // Simple class to pass data back to the UI
         public class ScanUpdate
@@ -205,7 +141,7 @@ namespace FileSize
                 {
                     if ((subDir.Attributes & FileAttributes.ReparsePoint) == FileAttributes.ReparsePoint) continue;
                     subDirs.Add(subDir.FullName);
-                    nFolder++;
+                    Interlocked.Increment(ref nFolder);
                 }
 
                 // CRITICAL: Save the structure NOW so the UI can expand this folder 
@@ -221,6 +157,16 @@ namespace FileSize
                 // Save the final size
                 _folderSizes[dir.FullName] = currentDirSize;
 
+               // PUSH to the bucket so the UI thread sees the final size
+                _updateBucket.Enqueue(new ScanUpdate
+                {
+                    ParentPath = dir.Parent?.FullName ?? "",
+                    FullPath = dir.FullName,
+                    ItemName = dir.Name,
+                    Size = currentDirSize,
+                    IsFolder = true
+                });
+
                 if (dir.FullName == rootDir.FullName)
                 {
                     this.Invoke(() => { treeView1.Nodes[0].Text = $"{dir.Name} - [{FormatSize(currentDirSize)}]"; });
@@ -229,6 +175,62 @@ namespace FileSize
             catch (UnauthorizedAccessException) { }
             return currentDirSize;
         }
+
+        private void FlushUpdateBucket(object sender, EventArgs e)
+        {
+            if (_updateBucket.IsEmpty) return;
+            _uiUpdateTimer.Stop();
+
+            HashSet<TreeNode> dirtyParents = new HashSet<TreeNode>();
+            treeView1.BeginUpdate();
+            try
+            {
+                while (_updateBucket.TryDequeue(out var update))
+                {
+                    // Only update if the node is currently visible (registered in _pathMap)
+                    if (_pathMap.TryGetValue(update.FullPath, out TreeNode currentNode))
+                    {
+                        currentNode.Tag = update.Size;
+                        currentNode.Text = $"{update.ItemName} - [{FormatSize(update.Size)}]";
+
+                        if (currentNode.Parent != null)
+                            dirtyParents.Add(currentNode.Parent);
+                    }
+                }
+
+                foreach (var parent in dirtyParents)
+                {
+                    SortFolderNodes(parent);
+                }
+            }
+            finally
+            {
+                treeView1.EndUpdate();
+                _uiUpdateTimer.Start();
+            }
+        }
+
+        private void SortFolderNodes(TreeNode parent)
+        {
+            if (parent.Nodes.Count < 2) return;
+
+            // Get the current order
+            var currentNodes = parent.Nodes.Cast<TreeNode>().ToList();
+
+            // Determine what the sorted order SHOULD be
+            var sortedNodes = currentNodes
+                .OrderByDescending(n => n.Tag is long l ? l : 0L)
+                .ToList();
+
+            // CRITICAL: Only update the UI if the order actually changed
+            // This saves massive amounts of rendering time
+            if (!currentNodes.SequenceEqual(sortedNodes))
+            {
+                parent.Nodes.Clear();
+                parent.Nodes.AddRange(sortedNodes.ToArray());
+            }
+        }
+
 
 
         private string FormatSize(long bytes)
@@ -244,18 +246,7 @@ namespace FileSize
             return string.Format("{0:n1} {1}", number, suffixes[counter]);
         }
 
-        private void Form1_Resize(object sender, EventArgs e)
-        {
-            treeView1.Width = this.ClientSize.Width / 3;
-            treeView1.Height = this.statusStrip1.Top - 10 - treeView1.Top;
-            listViewFiles.Left = treeView1.Right + 10;
-            listViewFiles.Width = this.ClientSize.Width - treeView1.Width - 30;
-            listViewFiles.Height = treeView1.Height;
-            listViewFiles.Columns[0].Width = listViewFiles.Width / 3 * 2;
-            listViewFiles.Columns[1].Width = listViewFiles.Width / 6;
-            listViewFiles.Columns[2].Width = listViewFiles.Width / 6;
-        }
-
+       
         private void EnableDoubleBuffering()
         {
             // This tells Windows to paint the TreeView in memory before showing it on screen,
@@ -276,14 +267,11 @@ namespace FileSize
         private void treeView1_BeforeExpand(object sender, TreeViewCancelEventArgs e)
         {
             TreeNode parentNode = e.Node;
-
-            // 1. Check if we have a dummy node
             if (parentNode.Nodes.Count == 1 && parentNode.Nodes[0].Text == "Loading...")
             {
                 parentNode.Nodes.Clear();
                 string path = parentNode.Name;
 
-                // 2. Pull children from our background cache
                 if (_folderStructure.TryGetValue(path, out List<string> children))
                 {
                     foreach (var childPath in children)
@@ -297,16 +285,15 @@ namespace FileSize
                             Tag = size
                         };
 
-                        // 3. Add a dummy if this child has sub-folders according to our cache
+                        // CRITICAL: Register this node so FlushUpdateBucket can find it!
+                        _pathMap[childPath] = childNode;
+
                         if (_folderStructure.ContainsKey(childPath) && _folderStructure[childPath].Count > 0)
                         {
                             childNode.Nodes.Add("Loading...");
                         }
-
                         parentNode.Nodes.Add(childNode);
                     }
-
-                    // 4. Sort only these new visible nodes
                     SortFolderNodes(parentNode);
                 }
             }
