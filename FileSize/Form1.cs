@@ -32,37 +32,43 @@ namespace FileSize
             if (_updateBucket.IsEmpty) return;
             _uiUpdateTimer.Stop();
 
-            // Track which parents need sorting so we only do it ONCE per parent
             HashSet<TreeNode> dirtyParents = new HashSet<TreeNode>();
             var watch = System.Diagnostics.Stopwatch.StartNew();
 
             treeView1.BeginUpdate();
             try
             {
-                // Process for a max of 100ms per tick or 5000 items
                 int count = 0;
-                while (_updateBucket.TryDequeue(out var update) && count < 5000 && watch.ElapsedMilliseconds < 100)
+                while (_updateBucket.TryDequeue(out var update) && count < 5000 && watch.ElapsedMilliseconds < 30)
                 {
                     count++;
-                    if (!_pathMap.TryGetValue(update.ParentPath, out TreeNode parentNode)) continue;
+                    TreeNode currentNode = null;
 
-                    if (!_pathMap.TryGetValue(update.FullPath, out TreeNode currentNode))
+                    // 1. Try to find the node directly (Works for Root and existing folders)
+                    if (_pathMap.TryGetValue(update.FullPath, out currentNode))
                     {
-                        currentNode = new TreeNode(update.ItemName) { Name = update.FullPath, Tag = 0L };
+                        currentNode.Tag = update.Size;
+                    }
+                    // 2. If it's a new subfolder, try to find the parent to create it
+                    else if (!string.IsNullOrEmpty(update.ParentPath) && _pathMap.TryGetValue(update.ParentPath, out TreeNode parentNode))
+                    {
+                        currentNode = new TreeNode(update.ItemName) { Name = update.FullPath, Tag = update.Size };
                         parentNode.Nodes.Add(currentNode);
                         _pathMap[update.FullPath] = currentNode;
+                        dirtyParents.Add(parentNode);
                     }
 
-                    // Update Tag and Text
-                    currentNode.Tag = update.Size;
-                    currentNode.Text = update.IsFolder
-                        ? $"{update.ItemName} - [{FormatSize(update.Size)}]"
-                        : $"{update.ItemName} ({FormatSize(update.Size)})";
+                    // 3. Always refresh the text if we have a node (either old or newly created)
+                    if (currentNode != null)
+                    {
+                        currentNode.Text = $"{update.ItemName} - [{FormatSize(update.Size)}]";
 
-                    dirtyParents.Add(parentNode);
+                        if (currentNode.Parent != null)
+                            dirtyParents.Add(currentNode.Parent);
+                    }
                 }
 
-                // NOW sort each unique parent once
+                // Sort parents that had children change
                 foreach (var parent in dirtyParents)
                 {
                     SortFolderNodes(parent);
@@ -72,7 +78,6 @@ namespace FileSize
             {
                 treeView1.EndUpdate();
                 if (!_updateBucket.IsEmpty) _uiUpdateTimer.Start();
-                // If the scan is finished and bucket is empty, don't restart the timer.
             }
         }
 
@@ -109,6 +114,8 @@ namespace FileSize
             public bool IsFolder { get; set; }
         }
 
+
+        private DirectoryInfo rootDir;
         private async void btnScan_Click(object sender, EventArgs e)
         {
             // 1. If a scan is already running, stop it first!
@@ -131,8 +138,14 @@ namespace FileSize
                 treeView1.Nodes.Clear();
                 listViewFiles.Items.Clear(); // Clear your file pane too
 
-                var rootDir = new DirectoryInfo(fbd.SelectedPath);
-                var rootNode = new TreeNode(rootDir.Name) { Name = rootDir.FullName };
+                rootDir = new DirectoryInfo(fbd.SelectedPath);
+                var rootNode = new TreeNode(rootDir.Name)
+                {
+                    Name = rootDir.FullName, // This is the key for the dictionary
+                    Tag = 0L
+                };
+
+                rootNode.Nodes.Add("Loading..."); // Add the trigger for the expand event
                 treeView1.Nodes.Add(rootNode);
                 _pathMap[rootDir.FullName] = rootNode;
 
@@ -169,48 +182,48 @@ namespace FileSize
         private int nFolder = 0;
         private int nFile = 0;
 
+        // Use this to store the "Source of Truth" for folder sizes and children
+        private ConcurrentDictionary<string, long> _folderSizes = new();
+        private ConcurrentDictionary<string, List<string>> _folderStructure = new();
+
         private long SafeDynamicScan(DirectoryInfo dir, CancellationToken token)
         {
-
-            // Check if the user clicked Stop
             if (token.IsCancellationRequested) return 0;
-
             long currentDirSize = 0;
+
             try
             {
-                // Sum files internally (Don't Enqueue these!)
+                var subDirs = new List<string>();
                 foreach (var file in dir.GetFiles())
                 {
+                    if (token.IsCancellationRequested) return 0;
                     currentDirSize += file.Length;
-                    nFile++;
+                    Interlocked.Increment(ref nFile);
                 }
 
                 foreach (var subDir in dir.GetDirectories())
                 {
                     if ((subDir.Attributes & FileAttributes.ReparsePoint) == FileAttributes.ReparsePoint) continue;
-
-                    // Report folder to UI
-                    _updateBucket.Enqueue(new ScanUpdate
-                    {
-                        ParentPath = dir.FullName,
-                        ItemName = subDir.Name,
-                        FullPath = subDir.FullName,
-                        IsFolder = true
-                    });
-
-                    long subSize = SafeDynamicScan(subDir, token);
-                    currentDirSize += subSize;
-
-                    // Update folder with its final cumulative size
-                    _updateBucket.Enqueue(new ScanUpdate
-                    {
-                        ParentPath = dir.FullName,
-                        ItemName = subDir.Name,
-                        FullPath = subDir.FullName,
-                        Size = subSize,
-                        IsFolder = true
-                    });
+                    subDirs.Add(subDir.FullName);
                     nFolder++;
+                }
+
+                // CRITICAL: Save the structure NOW so the UI can expand this folder 
+                // while the sizes are still being calculated in the background.
+                _folderStructure[dir.FullName] = subDirs;
+
+                // Now do the heavy lifting
+                foreach (var subPath in subDirs)
+                {
+                    currentDirSize += SafeDynamicScan(new DirectoryInfo(subPath), token);
+                }
+
+                // Save the final size
+                _folderSizes[dir.FullName] = currentDirSize;
+
+                if (dir.FullName == rootDir.FullName)
+                {
+                    this.Invoke(() => { treeView1.Nodes[0].Text = $"{dir.Name} - [{FormatSize(currentDirSize)}]"; });
                 }
             }
             catch (UnauthorizedAccessException) { }
@@ -223,7 +236,7 @@ namespace FileSize
             string[] suffixes = { "B", "KB", "MB", "GB", "TB" };
             int counter = 0;
             decimal number = (decimal)bytes;
-            while (Math.Round(number / 1024) >= 1)
+            while (number >= 1024)
             {
                 number /= 1024;
                 counter++;
@@ -257,6 +270,46 @@ namespace FileSize
             timer1.Stop();
             statusStrip1.Items[0].Text = $"Folders: {nFolder} | Files: {nFile}";
             timer1.Start();
+        }
+
+
+        private void treeView1_BeforeExpand(object sender, TreeViewCancelEventArgs e)
+        {
+            TreeNode parentNode = e.Node;
+
+            // 1. Check if we have a dummy node
+            if (parentNode.Nodes.Count == 1 && parentNode.Nodes[0].Text == "Loading...")
+            {
+                parentNode.Nodes.Clear();
+                string path = parentNode.Name;
+
+                // 2. Pull children from our background cache
+                if (_folderStructure.TryGetValue(path, out List<string> children))
+                {
+                    foreach (var childPath in children)
+                    {
+                        var di = new DirectoryInfo(childPath);
+                        long size = _folderSizes.GetValueOrDefault(childPath, 0);
+
+                        TreeNode childNode = new TreeNode($"{di.Name} - [{FormatSize(size)}]")
+                        {
+                            Name = childPath,
+                            Tag = size
+                        };
+
+                        // 3. Add a dummy if this child has sub-folders according to our cache
+                        if (_folderStructure.ContainsKey(childPath) && _folderStructure[childPath].Count > 0)
+                        {
+                            childNode.Nodes.Add("Loading...");
+                        }
+
+                        parentNode.Nodes.Add(childNode);
+                    }
+
+                    // 4. Sort only these new visible nodes
+                    SortFolderNodes(parentNode);
+                }
+            }
         }
 
         private void treeView1_AfterSelect(object sender, TreeViewEventArgs e)

@@ -51,6 +51,7 @@
             treeView1.Name = "treeView1";
             treeView1.Size = new Size(241, 382);
             treeView1.TabIndex = 0;
+            treeView1.BeforeExpand += treeView1_BeforeExpand;
             treeView1.AfterSelect += treeView1_AfterSelect;
             treeView1.NodeMouseClick += treeView1_NodeMouseClick;
             // 
@@ -58,7 +59,7 @@
             // 
             ctxMenuTree.Items.AddRange(new ToolStripItem[] { toolStripMenuItem1 });
             ctxMenuTree.Name = "contextMenuStrip1";
-            ctxMenuTree.Size = new Size(184, 48);
+            ctxMenuTree.Size = new Size(184, 26);
             ctxMenuTree.Click += openInFileExplorerToolStripMenuItem_Click;
             // 
             // toolStripMenuItem1
